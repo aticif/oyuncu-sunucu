@@ -393,9 +393,9 @@ function handleMessage(ws, raw) {
                     ownerId: player.id,
                     position: { ...player.position },
                     dir: msg.dir || { x: 0, y: 0, z: -1 },
-                    speed: msg.type2 === 'rocket' ? 1.6 : 2.4,
+                    speed: msg.type2 === 'rocket' ? 45 : 66,
                     damage: msg.damage || 10,
-                    life: 3
+                    life: 4
                 });
             }
             break;
