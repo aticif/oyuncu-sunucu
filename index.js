@@ -67,6 +67,7 @@ function createRoom(id) {
         spawnQueue: [],
         spawnTimer: 1,
         started: false,
+        wavePending: false,
         usedColors: new Set()
     });
     return rooms.get(id);
@@ -124,7 +125,10 @@ function playerJoin(ws, name) {
         shieldActive: 0,
         shieldCooldown: 0,
         invuln: 0,
-        tripleTimer: 0
+        tripleTimer: 0,
+        combo: 0,
+        comboTime: 0,
+        lastShotAt: 0
     };
 
     room.players.set(id, player);
@@ -141,7 +145,8 @@ function playerJoin(ws, name) {
         players: Array.from(room.players.values()).map(p => ({
             id: p.id, name: p.name, position: p.position, rotation: p.rotation,
             health: p.health, maxHealth: p.maxHealth, score: p.score, color: p.color, alive: p.alive,
-            shield: p.shield, shieldActive: p.shieldActive, invuln: p.invuln, tripleTimer: p.tripleTimer
+            shield: p.shield, shieldActive: p.shieldActive, invuln: p.invuln, tripleTimer: p.tripleTimer,
+            combo: p.combo, comboTime: p.comboTime
         })),
         wave: room.wave,
         isBossWave: room.isBossWave
@@ -193,7 +198,8 @@ function broadcastState(room) {
         players: Array.from(room.players.values()).map(p => ({
             id: p.id, name: p.name, position: p.position, rotation: p.rotation,
             health: p.health, maxHealth: p.maxHealth, score: p.score, color: p.color, alive: p.alive,
-            shield: p.shield, shieldActive: p.shieldActive, invuln: p.invuln, tripleTimer: p.tripleTimer
+            shield: p.shield, shieldActive: p.shieldActive, invuln: p.invuln, tripleTimer: p.tripleTimer,
+            combo: p.combo, comboTime: p.comboTime
         })),
         enemies: room.enemies.map(e => ({
             id: e.id, type: e.type, pattern: e.pattern, position: e.position, hp: e.hp, maxHp: e.maxHp, size: e.size
@@ -299,21 +305,27 @@ function tick(room) {
             if (p.respawnTimer <= 0) {
                 const center = roomCenter(room);
                 p.alive = true;
-                p.health = 100;
+                p.health = p.maxHealth;   // max cana dönsün (dalga artışı korunur)
                 p.shield = 100;
                 p.shieldActive = 0;
                 p.shieldCooldown = 0;
-                p.position = { x: center.x, y: 0, z: center.z };
+                p.invuln = 30;            // doğar doğmaz ölmesin (~1 sn koruma)
+                p.combo = 0; p.comboTime = 0;
+                p.position = { x: center.x + (Math.random() - 0.5) * 8, y: 0, z: center.z + (Math.random() - 0.5) * 8 };
                 p.rotation = { x: 0, y: 0, z: 0 };
                 p.respawnTimer = null;
                 broadcastToRoom(room, { type: 'player_respawn', id: p.id, position: p.position });
             }
         }
     }
-    // Ateşli silah süresi + dogunma koruması tick'i
+    // Ateşli silah süresi + dogunma koruması + kombo süresi tick'i
     for (const p of room.players.values()) {
         if (p.tripleTimer > 0) p.tripleTimer = Math.max(0, p.tripleTimer - 0.03);
         if (p.invuln > 0) p.invuln--;
+        if (p.comboTime > 0) {
+            p.comboTime -= 0.03;
+            if (p.comboTime <= 0) p.combo = 0;
+        }
     }
     // Spawn queue (ekranda en fazla 8 düşman)
     if (room.spawnQueue.length > 0 && room.enemies.length < 8) {
@@ -323,9 +335,13 @@ function tick(room) {
             const type = room.spawnQueue.shift();
             spawnEnemy(room, type);
         }
-    } else if (room.spawnQueue.length === 0 && room.enemies.length === 0 && room.started) {
-        // Dalga bitti, yeni dalga
-        setTimeout(() => startNextWave(room), 400);
+    } else if (!room.wavePending && room.spawnQueue.length === 0 && room.enemies.length === 0 && room.started) {
+        // Dalga bitti — tek sefer tetikle (her tick'te birkaç kez başlamasın)
+        room.wavePending = true;
+        const bonus = 100 * Math.max(1, room.players.size);
+        for (const p of room.players.values()) if (p.alive) p.score += bonus;
+        broadcastToRoom(room, { type: 'wave_finish', wave: room.wave, bonus });
+        setTimeout(() => { room.wavePending = false; startNextWave(room); }, 900);
     }
 
     // Power-up toplama
@@ -424,15 +440,18 @@ function tick(room) {
         // oyuncuya isabet?
         for (const p of room.players.values()) {
             if (!p.alive) continue;
-            if (Math.hypot(p.position.x - b.position.x, p.position.y - b.position.y, p.position.z - b.position.z) < 2.2) {
-                if (p.shieldActive > 0) {
-                    room.enemyBullets.splice(i, 1);
-                    broadcastToRoom(room, { type: 'player_shield_hit', id: p.id });
-                    break;
-                }
+            const dist = Math.hypot(p.position.x - b.position.x, p.position.y - b.position.y, p.position.z - b.position.z);
+            // Kalkan küresi (yarıçap 3.0) mermiyi bloklar — görselle uyumlu
+            if (dist < 3.0 && p.shieldActive > 0) {
+                room.enemyBullets.splice(i, 1);
+                broadcastToRoom(room, { type: 'player_shield_hit', id: p.id });
+                break;
+            }
+            if (dist < 2.2) {
                 if (p.invuln > 0) break; // dokunulmazlık süresi — mermi geçer
                 p.health -= 10;
                 p.invuln = 15; // ~0.5 sn dokunulmazlık
+                p.combo = 0; p.comboTime = 0; // hasar alınca kombo sıfırlanır
                 if (p.health <= 0) { p.health = 0; p.alive = false; }
                 room.enemyBullets.splice(i, 1);
                 broadcastToRoom(room, { type: 'player_hit', id: p.id, health: p.health, alive: p.alive });
@@ -457,9 +476,14 @@ function tick(room) {
                 e.hp -= b.damage;
                 hitSomething = true;
                 if (e.hp <= 0) {
-                    // ödül
+                    // ödül — kombo çarpanı: 3 kill'de bir kademe (x1 → x5)
                     const p = room.players.get(b.ownerId);
-                    if (p) p.score += e.score;
+                    if (p) {
+                        p.combo = (p.combo || 0) + 1;
+                        p.comboTime = 5;
+                        const mult = 1 + Math.min(4, Math.floor(p.combo / 3));
+                        p.score += e.score * mult;
+                    }
                     room.enemies.splice(j, 1);
                     // %15 ihtimalle güç-yükseltme; boss her zaman bırakır
                     if (e.pattern === 'boss') {
@@ -481,15 +505,17 @@ function tick(room) {
         if (!hitSomething && b.ownerId !== 'enemy') {
             for (const p of room.players.values()) {
                 if (p.id === b.ownerId || !p.alive) continue;
-                if (Math.hypot(p.position.x - b.position.x, p.position.y - b.position.y, p.position.z - b.position.z) < 2.4) {
-                    if (p.shieldActive > 0) {
-                        hitSomething = true;
-                        broadcastToRoom(room, { type: 'player_shield_hit', id: p.id });
-                        break;
-                    }
+                const pvpDist = Math.hypot(p.position.x - b.position.x, p.position.y - b.position.y, p.position.z - b.position.z);
+                if (pvpDist < 3.0 && p.shieldActive > 0) {
+                    hitSomething = true;
+                    broadcastToRoom(room, { type: 'player_shield_hit', id: p.id });
+                    break;
+                }
+                if (pvpDist < 2.2) {
                     if (p.invuln > 0) break; // dokunulmazlık
                     p.health -= b.damage;
                     p.invuln = 15;
+                    p.combo = 0; p.comboTime = 0;
                     hitSomething = true;
                     if (p.health <= 0) {
                         p.health = 0;
@@ -528,8 +554,14 @@ function handleMessage(ws, raw) {
                 player.rotation = msg.rotation || player.rotation;
             }
             break;
+        case 'ping':
+            // Gerçek RTT ölçümü: client'in gönderdiği zaman damgasını aynen geri gönder
+            send(player, { type: 'pong', t: msg.t });
+            break;
         case 'shoot':
             if (player.alive) {
+                if (Date.now() - (player.lastShotAt || 0) < 50) break; // hızlı tıklama koruması
+                player.lastShotAt = Date.now();
                 if (player.tripleTimer > 0) {
                     // Güç-yükseltme: paralel 3 lü atış
                     const base = msg.dir || { x: 0, y: 0, z: -1 };
@@ -539,7 +571,7 @@ function handleMessage(ws, raw) {
                             ownerId: player.id,
                             position: { ...player.position },
                             dir: norm({ x: base.x - base.z * 0.4 * k, y: base.y, z: base.z + base.x * 0.4 * k }),
-                            speed: 66, damage: 7, life: 3, t2: 2
+                            speed: 66, damage: 8, life: 3, t2: 2
                         });
                     }
                 } else if (msg.type2 === 2) {
@@ -555,15 +587,17 @@ function handleMessage(ws, raw) {
                         });
                     }
                 } else {
+                    // Hasar sunucuda belirlenir (client'a güvenilmez): roket ağır vurur
+                    const t2 = msg.type2 === 1 ? 1 : 0;
                     room.bullets.push({
                         id: 'b' + Date.now() + Math.random(),
                         ownerId: player.id,
                         position: { ...player.position },
                         dir: msg.dir || { x: 0, y: 0, z: -1 },
-                        speed: msg.type2 === 1 ? 45 : 66,
-                        damage: msg.damage || 10,
-                        life: 4,
-                        t2: msg.type2 || 0
+                        speed: t2 === 1 ? 45 : 66,
+                        damage: t2 === 1 ? 30 : 10,
+                        life: t2 === 1 ? 6 : 4,
+                        t2
                     });
                 }
             }
