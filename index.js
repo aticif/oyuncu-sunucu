@@ -765,7 +765,7 @@ function agarTick() {
     const lb = Array.from(aPlayers.values())
         .sort((a, b) => b.mass - a.mass)
         .slice(0, 10)
-        .map(p => ({ name: p.name, mass: Math.floor(p.mass) }));
+        .map(p => ({ id: p.id, name: p.name, mass: Math.floor(p.mass) }));
     broadcastA({ type: 'state', players: aSnap(), leaderboard: lb });
 }
 
