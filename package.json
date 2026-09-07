@@ -1,0 +1,12 @@
+{
+  "name": "space-shooter-online-server",
+  "version": "1.0.0",
+  "description": "Space Shooter çok oyunculu WebSocket sunucusu",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "ws": "^8.17.0"
+  }
+}
