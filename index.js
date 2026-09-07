@@ -251,10 +251,32 @@ function roomCenter(room) {
 
 // ===== TİK DÖNGÜSÜ =====
 function tick(room) {
-    // Kalkan aktif süresini azalt
+    // Kalkan enerjisi yenilenir + aktif süre azalır
     for (const p of room.players.values()) {
         if (p.shieldActive > 0) {
             p.shieldActive = Math.max(0, p.shieldActive - 0.03);
+        }
+        if (p.alive) {
+            p.shield = Math.min(100, p.shield + 0.33); // ~10/sn dolum
+        }
+    }
+
+    // Ölen oyuncular için yeniden doğuş sayacı (~8 sn)
+    for (const p of room.players.values()) {
+        if (!p.alive) {
+            p.respawnTimer = (p.respawnTimer == null ? 8 : p.respawnTimer);
+            p.respawnTimer -= 0.03;
+            if (p.respawnTimer <= 0) {
+                const center = roomCenter(room);
+                p.alive = true;
+                p.health = 100;
+                p.shield = 100;
+                p.shieldActive = 0;
+                p.position = { x: center.x, y: 0, z: center.z };
+                p.rotation = { x: 0, y: 0, z: 0 };
+                p.respawnTimer = null;
+                broadcastToRoom(room, { type: 'player_respawn', id: p.id, position: p.position });
+            }
         }
     }
     // Spawn queue
