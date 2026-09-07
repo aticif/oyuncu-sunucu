@@ -625,8 +625,8 @@ function handleMessage(ws, raw) {
 }
 
 // ===== AGAR MODU (2D blob — agar.io grafik + mekanik: bölün, yem at, virüs) =====
-const A_W = 2000, A_H = 2000;
-const A_FOOD_TARGET = 1000;
+const A_W = 10000, A_H = 10000;
+const A_FOOD_TARGET = 4000;
 const AGAR_COLORS = ['#ff5555', '#4ecdc4', '#ffe66d', '#6c5ce7', '#fd79a8', '#00b894', '#fdcb6e', '#e17055', '#0984e3', '#a29bfe', '#ff9ff3', '#feca57'];
 const aPlayers = new Map(); // id -> { id, name, ws, color, cells:[], tx, ty, remergeUntil }
 let aFood = [];    // küçük yem noktaları
@@ -759,7 +759,7 @@ function agarSplit(p) {
     if (p.cells.length >= 8) return;
     let spawned = 0;
     for (const c of p.cells.slice()) {
-        if (c.mass < 36) continue;
+        if (c.mass < 35) continue;
         const dx = p.tx - c.x, dy = p.ty - c.y;
         const d = Math.hypot(dx, dy) || 1;
         const ux = dx / d, uy = dy / d;
@@ -767,10 +767,10 @@ function agarSplit(p) {
         c.mass = half; c.r = aR(half);
         p.cells.push(newCell(c.x + ux * c.r * 1.4, c.y + uy * c.r * 1.4, half, ux * 150, uy * 150));
         spawned++;
-        if (p.cells.length >= 8) break;
+        if (p.cells.length >= 16) break;
     }
     if (spawned) {
-        p.remergeUntil = Date.now() + Math.min(30000, 4000 + aPTotal(p) * 8);
+        p.remergeUntil = Date.now() + 27000;
         p.lastSplitTime = Date.now();
     }
 }
@@ -778,11 +778,11 @@ function agarSplit(p) {
 function agarEject(p) {
     let c = null, cm = -1;
     for (const cc of p.cells) if (cc.mass > cm) { cm = cc.mass; c = cc; }
-    if (!c || c.mass < 40) return;
+    if (!c || c.mass < 35) return;
     const dx = p.tx - c.x, dy = p.ty - c.y;
     const d = Math.hypot(dx, dy) || 1;
     const ux = dx / d, uy = dy / d;
-    c.mass -= 14; c.r = aR(c.mass);
+    c.mass -= 18; c.r = aR(c.mass);
     const pel = { id: 'ap' + (aPelletId++), x: c.x + ux * (c.r + 10), y: c.y + uy * (c.r + 10), r: 7, mass: 14, vx: ux * 220, vy: uy * 220, born: Date.now(), color: p.color };
     aPellets.push(pel);
     c.vx -= ux * 30; c.vy -= uy * 30;
@@ -800,7 +800,7 @@ function agarExplodeCell(p, c) {
         const a = Math.random() * Math.PI * 2;
         p.cells.push(newCell(Math.max(c.r, Math.min(A_W - c.r, c.x + Math.cos(a) * 10)), Math.max(c.r, Math.min(A_H - c.r, c.y + Math.sin(a) * 10)), pm, Math.cos(a) * 190, Math.sin(a) * 190));
     }
-    p.remergeUntil = Date.now() + Math.min(30000, 4000 + aPTotal(p) * 8);
+    p.remergeUntil = Date.now() + 27000;
     broadcastA({ type: 'spray', x: c.x, y: c.y, color: p.color, n: 22 });
 }
 
@@ -851,7 +851,7 @@ function agarTick() {
             const dx = p.tx - c.x, dy = p.ty - c.y;
             const d = Math.hypot(dx, dy);
             if (d > 18) {
-                const sp = Math.max(50, 335 * Math.sqrt(25 / c.mass));
+                const sp = Math.max(30, 86.05 / Math.pow(c.r, 0.45) * 27);
                 const m = Math.min(sp * dt, d);
                 c.x += (dx / d) * m + c.vx * dt;
                 c.y += (dy / d) * m + c.vy * dt;
@@ -860,7 +860,7 @@ function agarTick() {
             }
             c.x = Math.max(c.r, Math.min(A_W - c.r, c.x));
             c.y = Math.max(c.r, Math.min(A_H - c.r, c.y));
-            c.mass = Math.max(25, c.mass - c.mass * 0.0007);
+            c.mass = Math.max(25, c.mass - c.mass * 0.0002);
             c.r = aR(c.mass);
         }
     }
@@ -940,9 +940,9 @@ function agarTick() {
                 for (let si = sm.cells.length - 1; si >= 0; si--) {
                     const sc = sm.cells[si];
                     if (sm.invulnUntil > Date.now()) continue; // dokunulmaz
-                    if (bcell.mass / sc.mass < 1.2) continue;
+                    if (bcell.mass / sc.mass < 1.25) continue;
                     const d = Math.hypot(bcell.x - sc.x, bcell.y - sc.y);
-                    if (d < bcell.r - sc.r * 0.4) {
+                    if (d < bcell.r) {
                         bcell.mass += sc.mass; bcell.r = aR(bcell.mass);
                         sm.cells.splice(si, 1);
                         broadcastA({ type: 'spray', x: sc.x, y: sc.y, color: sm.color, n: 16 });
