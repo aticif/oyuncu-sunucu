@@ -711,7 +711,9 @@ function newCell(x, y, mass, vx, vy) {
 function aSnap() {
     return Array.from(aPlayers.values()).map(p => ({
         id: p.id, name: p.name, color: p.color, mass: Math.floor(aPTotal(p)),
-        cells: p.cells.map(c => ({ x: Math.round(c.x), y: Math.round(c.y), r: Math.round(c.r), mass: Math.round(c.mass) }))
+        cells: p.cells.map(c => ({ x: c.x, y: c.y, r: c.r, mass: c.mass })),
+        remergeUntil: p.remergeUntil || 0,
+        invulnUntil: p.invulnUntil || 0
     }));
 }
 
@@ -734,7 +736,8 @@ function agarConnect(ws, name) {
     const p = {
         id, name: name || 'Oyuncu', ws,
         color: AGAR_COLORS[Math.floor(Math.random() * AGAR_COLORS.length)],
-        cells: [], tx: sp.x, ty: sp.y, remergeUntil: 0
+        cells: [], tx: sp.x, ty: sp.y, remergeUntil: 0,
+        lastSplitTime: 0, chainCombo: 0, invulnUntil: Date.now() + 3000
     };
     p.cells.push(newCell(sp.x, sp.y, 25));
     aPlayers.set(id, p);
@@ -766,7 +769,10 @@ function agarSplit(p) {
         spawned++;
         if (p.cells.length >= 8) break;
     }
-    if (spawned) p.remergeUntil = Date.now() + Math.min(30000, 4000 + aPTotal(p) * 8);
+    if (spawned) {
+        p.remergeUntil = Date.now() + Math.min(30000, 4000 + aPTotal(p) * 8);
+        p.lastSplitTime = Date.now();
+    }
 }
 
 function agarEject(p) {
@@ -823,7 +829,7 @@ function agarHandleMessage(p, msg) {
 
 function agarTick() {
     if (aPlayers.size === 0) return;
-    ensureFood();
+    if (aFood.length < A_FOOD_TARGET - 100) ensureFood();
     const dt = 0.1;
 
     // Hareket: her hücre hedefe gider, fırlatma impulsu söner
@@ -863,6 +869,21 @@ function agarTick() {
     for (const f of aPellets) {
         f.x += f.vx * dt; f.y += f.vy * dt;
         f.vx *= 0.9; f.vy *= 0.9;
+        // Magnetic pellets: feast son 5sn'de en yakın oyuncuya çek
+        if (feastMode && Date.now() > feastEnd - 5000 && aPlayers.size > 0) {
+            let nearP = null, nearD = 99999;
+            for (const p of aPlayers.values()) {
+                for (const c of p.cells) {
+                    const dd = Math.hypot(c.x - f.x, c.y - f.y);
+                    if (dd < nearD) { nearD = dd; nearP = c; }
+                }
+            }
+            if (nearP && nearD > 1) {
+                const pull = 80 * dt;
+                f.vx += ((nearP.x - f.x) / nearD) * pull;
+                f.vy += ((nearP.y - f.y) / nearD) * pull;
+            }
+        }
         f.x = Math.max(f.r, Math.min(A_W - f.r, f.x));
         f.y = Math.max(f.r, Math.min(A_H - f.r, f.y));
     }
@@ -918,6 +939,7 @@ function agarTick() {
                 if (big === sm) continue;
                 for (let si = sm.cells.length - 1; si >= 0; si--) {
                     const sc = sm.cells[si];
+                    if (sm.invulnUntil > Date.now()) continue; // dokunulmaz
                     if (bcell.mass / sc.mass < 1.2) continue;
                     const d = Math.hypot(bcell.x - sc.x, bcell.y - sc.y);
                     if (d < bcell.r - sc.r * 0.4) {
@@ -930,8 +952,18 @@ function agarTick() {
                     const sp2 = safeCellPos();
                     sm.cells.push(newCell(sp2.x, sp2.y, 25));
                     sm.tx = sp2.x; sm.ty = sp2.y;
+                    sm.invulnUntil = Date.now() + 3000; // 3 sn dokunulmazlik
                     broadcastA({ type: 'eaten', eater: big.id, victim: sm.id, mass: Math.floor(aPTotal(big)) });
                     broadcastA({ type: 'killfeed', killer: big.name, victim: sm.name });
+                    // Chain combo: split'ten 3sn sonra yutma
+                    if (big.lastSplitTime && Date.now() - big.lastSplitTime < 3000) {
+                        big.chainCombo++;
+                        const bonus = Math.floor(sc.mass * 0.1);
+                        big.mass += bonus; big.r = aR(big.mass);
+                        broadcastA({ type: 'chain_combo', player: big.name, combo: big.chainCombo, bonus: bonus });
+                    } else {
+                        big.chainCombo = 0;
+                    }
                 }
             }
         }
@@ -948,7 +980,7 @@ function agarTick() {
                 for (let j = i + 1; j < cl.length && !changed; j++) {
                     const a = cl[i], b = cl[j];
                     const mx = Math.max(a.mass, b.mass), mn = Math.min(a.mass, b.mass);
-                    if (mx / mn <= 1.001) continue;
+                    if (mx / mn < 1) continue;
                     const big = a.mass >= b.mass ? a : b;
                     const small = a.mass >= b.mass ? b : a;
                     if (Math.hypot(big.x - small.x, big.y - small.y) < big.r - small.r * 0.6) {
@@ -962,12 +994,16 @@ function agarTick() {
         }
     }
 
-    // Lider + durum
+    // Lider + durum (5x/sn throttle)
+let lastStateBroadcast = 0;
+    const now = Date.now();
+    if (now - lastStateBroadcast < 200) return;
+    lastStateBroadcast = now;
     const lb = Array.from(aPlayers.values())
         .map(p => ({ id: p.id, name: p.name, mass: Math.floor(aPTotal(p)) }))
         .sort((a, b) => b.mass - a.mass)
         .slice(0, 10);
-    broadcastA({ type: 'state', players: aSnap(), leaderboard: lb });
+    broadcastA({ type: 'state', players: aSnap(), leaderboard: lb, totalPlayers: aPlayers.size });
 }
 
 setInterval(agarTick, 100);
