@@ -47,9 +47,11 @@ function totalPlayers() {
 }
 
 const ENEMY_TYPES = {
-    scout: { hp: 20, speed: 6, score: 100, size: 1, color: 0xff4444 },
-    fighter: { hp: 50, speed: 9, score: 250, size: 1.5, color: 0xff8800 },
-    tank: { hp: 120, speed: 4, score: 500, size: 2.2, color: 0xaa2200 }
+    scout: { hp: 20, speed: 6, score: 100, size: 1, color: 0xff4444, pattern: 'straight' },
+    fighter: { hp: 50, speed: 9, score: 250, size: 1.5, color: 0xff8800, pattern: 'straight' },
+    tank: { hp: 120, speed: 4, score: 500, size: 2.2, color: 0xaa2200, pattern: 'straight' },
+    zigzag: { hp: 30, speed: 10, score: 150, size: 1.2, color: 0xff55ff, pattern: 'zigzag' },
+    boss: { hp: 500, speed: 6, score: 2000, size: 3.4, color: 0xff0044, pattern: 'boss' }
 };
 
 function createRoom(id) {
@@ -59,6 +61,7 @@ function createRoom(id) {
         enemies: [],
         bullets: [],
         enemyBullets: [],
+        powerups: [],
         wave: 0,
         isBossWave: false,
         spawnQueue: [],
@@ -113,11 +116,15 @@ function playerJoin(ws, name) {
         position: { x: 0, y: 0, z: 0 },
         rotation: { x: 0, y: 0, z: 0 },
         health: 100,
+        maxHealth: 100,
         score: 0,
         alive: true,
         color: pickColor(room),
         shield: 100,
-        shieldActive: 0
+        shieldActive: 0,
+        shieldCooldown: 0,
+        invuln: 0,
+        tripleTimer: 0
     };
 
     room.players.set(id, player);
@@ -133,8 +140,8 @@ function playerJoin(ws, name) {
         maxPlayers: MAX_PLAYERS,
         players: Array.from(room.players.values()).map(p => ({
             id: p.id, name: p.name, position: p.position, rotation: p.rotation,
-            health: p.health, score: p.score, color: p.color, alive: p.alive,
-            shield: p.shield, shieldActive: p.shieldActive
+            health: p.health, maxHealth: p.maxHealth, score: p.score, color: p.color, alive: p.alive,
+            shield: p.shield, shieldActive: p.shieldActive, invuln: p.invuln, tripleTimer: p.tripleTimer
         })),
         wave: room.wave,
         isBossWave: room.isBossWave
@@ -185,14 +192,15 @@ function broadcastState(room) {
         type: 'state',
         players: Array.from(room.players.values()).map(p => ({
             id: p.id, name: p.name, position: p.position, rotation: p.rotation,
-            health: p.health, score: p.score, color: p.color, alive: p.alive,
-            shield: p.shield, shieldActive: p.shieldActive
+            health: p.health, maxHealth: p.maxHealth, score: p.score, color: p.color, alive: p.alive,
+            shield: p.shield, shieldActive: p.shieldActive, invuln: p.invuln, tripleTimer: p.tripleTimer
         })),
         enemies: room.enemies.map(e => ({
-            id: e.id, type: e.type, position: e.position, hp: e.hp, maxHp: e.maxHp, size: e.size
+            id: e.id, type: e.type, pattern: e.pattern, position: e.position, hp: e.hp, maxHp: e.maxHp, size: e.size
         })),
-        bullets: room.bullets.map(b => ({ id: b.id, position: b.position, dir: b.dir })),
+        bullets: room.bullets.map(b => ({ id: b.id, position: b.position, dir: b.dir, t2: b.t2 || 0 })),
         enemyBullets: room.enemyBullets.map(b => ({ id: b.id, position: b.position, dir: b.dir })),
+        powerups: room.powerups.filter(p => p).map(pu => ({ id: pu.id, type: pu.type, position: pu.position })),
         wave: room.wave,
         isBossWave: room.isBossWave
     };
@@ -206,15 +214,29 @@ function startNextWave(room) {
     room.wave++;
     room.isBossWave = (room.wave % 5 === 0);
     room.spawnQueue = [];
-    const baseCount = 4 + room.wave * 2 + room.players.size;
+    // Zorluk formülü: floor(5 + wave * 1.5) + oyuncu sayısı
+    const baseCount = Math.floor(5 + room.wave * 1.5) + room.players.size;
     const types = [];
     if (room.wave <= 2) types.push('scout');
     if (room.wave > 1) types.push('fighter');
     if (room.wave > 3) types.push('tank');
+    if (room.wave > 5) types.push('zigzag');
 
+    if (room.isBossWave) {
+        room.spawnQueue.push('boss');
+        room.spawnQueue.push('scout', 'fighter', 'scout');
+    }
     for (let i = 0; i < baseCount; i++) {
         const t = types[Math.floor(Math.random() * types.length)];
         room.spawnQueue.push(t);
+    }
+
+    // Her 3 dalgada oyuncunun max canı +%15
+    if (room.wave % 3 === 0) {
+        for (const p of room.players.values()) {
+            p.maxHealth = Math.round(p.maxHealth * 1.15);
+            p.health = Math.min(p.maxHealth, p.health + 10);
+        }
     }
     // Ses duyurusu
     broadcastToRoom(room, { type: 'wave_start', wave: room.wave, isBoss: room.isBossWave });
@@ -225,16 +247,21 @@ function spawnEnemy(room, type) {
     const angle = Math.random() * Math.PI * 2;
     const dist = 120 + Math.random() * 40;
     const center = roomCenter(room);
+    let pattern = cfg.pattern || 'straight';
+    if (type === 'fighter' && room.wave > 4 && Math.random() < 0.4) pattern = 'orbit';
+    if (type === 'tank' && room.wave > 5 && Math.random() < 0.35) pattern = 'orbit';
     const enemy = {
         id: 'e' + Date.now() + Math.floor(Math.random() * 10000),
         type,
+        pattern,
         position: { x: center.x + Math.cos(angle) * dist, y: (Math.random() - 0.5) * 30, z: center.z + Math.sin(angle) * dist },
         hp: cfg.hp * (1 + room.wave * 0.2),
         maxHp: cfg.hp * (1 + room.wave * 0.2),
         speed: cfg.speed,
         score: cfg.score,
         size: cfg.size,
-        moveState: Math.random() * 3
+        age: 0,
+        fireT: 30 + Math.floor(Math.random() * 30)
     };
     room.enemies.push(enemy);
     return enemy;
@@ -251,10 +278,13 @@ function roomCenter(room) {
 
 // ===== TİK DÖNGÜSÜ =====
 function tick(room) {
-    // Kalkan enerjisi yenilenir + aktif süre azalır
+    // Kalkan enerjisi yenilenir + aktif süre/cooldown azalır
     for (const p of room.players.values()) {
         if (p.shieldActive > 0) {
             p.shieldActive = Math.max(0, p.shieldActive - 0.03);
+        }
+        if (p.shieldCooldown > 0) {
+            p.shieldCooldown = Math.max(0, p.shieldCooldown - 0.03);
         }
         if (p.alive) {
             p.shield = Math.min(100, p.shield + 0.33); // ~10/sn dolum
@@ -272,6 +302,7 @@ function tick(room) {
                 p.health = 100;
                 p.shield = 100;
                 p.shieldActive = 0;
+                p.shieldCooldown = 0;
                 p.position = { x: center.x, y: 0, z: center.z };
                 p.rotation = { x: 0, y: 0, z: 0 };
                 p.respawnTimer = null;
@@ -279,49 +310,104 @@ function tick(room) {
             }
         }
     }
-    // Spawn queue
-    if (room.spawnQueue.length > 0) {
+    // Ateşli silah süresi + dogunma koruması tick'i
+    for (const p of room.players.values()) {
+        if (p.tripleTimer > 0) p.tripleTimer = Math.max(0, p.tripleTimer - 0.03);
+        if (p.invuln > 0) p.invuln--;
+    }
+    // Spawn queue (ekranda en fazla 8 düşman)
+    if (room.spawnQueue.length > 0 && room.enemies.length < 8) {
         room.spawnTimer--;
         if (room.spawnTimer <= 0) {
-            room.spawnTimer = 15;
+            room.spawnTimer = 12;
             const type = room.spawnQueue.shift();
             spawnEnemy(room, type);
         }
-    } else if (room.enemies.length === 0 && room.started) {
+    } else if (room.spawnQueue.length === 0 && room.enemies.length === 0 && room.started) {
         // Dalga bitti, yeni dalga
         setTimeout(() => startNextWave(room), 400);
     }
 
-    // Düşman hareketi + ateş
+    // Power-up toplama
+    for (let i = room.powerups.length - 1; i >= 0; i--) {
+        const pu = room.powerups[i];
+        pu.life = (pu.life || 15) - 0.03;
+        if (pu.life <= 0) { room.powerups.splice(i, 1); continue; }
+        let got = null;
+        for (const p of room.players.values()) {
+            if (!p.alive) continue;
+            if (Math.hypot(p.position.x - pu.position.x, p.position.y - pu.position.y, p.position.z - pu.position.z) < 3) { got = p; break; }
+        }
+        if (got) {
+            let cur = null;
+            if (pu.type === 'triple') { got.tripleTimer = 10; cur = 'triple'; }
+            else if (pu.type === 'shield') { got.shield = Math.min(100, got.shield + 40); cur = 'shield'; }
+            else if (pu.type === 'health') { got.health = Math.min(got.maxHealth, got.health + 20); cur = 'health'; }
+            room.powerups.splice(i, 1);
+            broadcastToRoom(room, { type: 'powerup_collected', id: pu.id, type: cur, by: got.id });
+        }
+    }
+
+    // Düşman hareketi + ateş (pattern odaklı)
     const center = roomCenter(room);
     for (const e of room.enemies) {
         const dx = center.x - e.position.x;
         const dz = center.z - e.position.z;
         const dist = Math.sqrt(dx * dx + dz * dz) || 1;
-        if (dist > 40) {
-            e.position.x += (dx / dist) * e.speed * 0.03;
-            e.position.z += (dz / dist) * e.speed * 0.03;
-        } else if (dist < 20) {
-            e.position.x -= (dx / dist) * e.speed * 0.015;
-            e.position.z -= (dz / dist) * e.speed * 0.015;
+        const dirx = dx / dist, dirz = dz / dist;
+        e.age = (e.age || 0) + 0.03;
+        const sp = e.speed;
+
+        if (e.pattern === 'zigzag') {
+            const osc = Math.sin(e.age * 4) * 0.8;
+            const px = -dirz, pz = dirx;
+            e.position.x += (dirx * sp + px * sp * osc) * 0.03;
+            e.position.z += (dirz * sp + pz * sp * osc) * 0.03;
+        } else if (e.pattern === 'orbit') {
+            const r = Math.max(14, 38 - e.age * 3);
+            e.orbitPhase = (e.orbitPhase == null ? e.age * 2 : e.orbitPhase) + 0.03 * (1 + sp * 0.03);
+            e.position.x = center.x + Math.cos(e.orbitPhase) * r;
+            e.position.z = center.z + Math.sin(e.orbitPhase) * r;
+        } else if (e.pattern === 'boss') {
+            // Boss: yörüngede döner, hp düştükçe hızlanır, faz 3'te yavru çağırır
+            const hpRatio = Math.max(0.01, e.hp / e.maxHp);
+            e.orbitPhase = (e.orbitPhase || 0) + 0.03 * (0.7 + (1 - hpRatio) * 0.8);
+            e.position.x = center.x + Math.cos(e.orbitPhase) * 42;
+            e.position.z = center.z + Math.sin(e.orbitPhase) * 42;
+            e.position.y = Math.sin(e.age * 0.5) * 8;
+            if (hpRatio < 0.35 && room.enemies.length < 10 && room.spawnQueue.length === 0 && Math.random() < 0.02) {
+                spawnEnemy(room, 'scout');
+            }
+        } else {
+            if (dist > 45) { e.position.x += dirx * sp * 0.03; e.position.z += dirz * sp * 0.03; }
+            else if (dist < 18) { e.position.x -= dirx * sp * 0.016; e.position.z -= dirz * sp * 0.016; }
         }
 
-        // Düşman ateşi (rastgele)
-        if (Math.random() < 0.02 && dist < 60) {
-            // en yakın oyuncuya
+        // Düşman ateşi — boss fazlara göre salvosu yüksek tutulur
+        e.fireT = (e.fireT || 0) - 1;
+        if (e.fireT <= 0) {
             let tgt = null, tdist = 1e9;
             for (const p of room.players.values()) {
                 if (!p.alive) continue;
                 const d = Math.hypot(p.position.x - e.position.x, p.position.y - e.position.y, p.position.z - e.position.z);
                 if (d < tdist) { tdist = d; tgt = p; }
             }
-            if (tgt) {
-                const dir = norm({ 
-                    x: tgt.position.x - e.position.x + (Math.random() - 0.5) * 3,
-                    y: tgt.position.y - e.position.y + (Math.random() - 0.5) * 3,
-                    z: tgt.position.z - e.position.z + (Math.random() - 0.5) * 3
-                });
-                room.enemyBullets.push({ id: 'eb' + Date.now() + Math.random(), position: { ...e.position }, dir, life: 4 });
+            if (tgt && tdist < (e.pattern === 'boss' ? 110 : 60)) {
+                const hpRatio = Math.max(0.01, e.hp / e.maxHp);
+                const burst = e.pattern === 'boss'
+                    ? (hpRatio > 0.6 ? 3 : hpRatio > 0.3 ? 5 : 7)
+                    : 1;
+                for (let k = 0; k < burst; k++) {
+                    const off = e.pattern === 'boss' ? (k - (burst - 1) / 2) * 0.3 : (Math.random() - 0.5) * 3;
+                    const dir = norm({
+                        x: tgt.position.x - e.position.x + off,
+                        y: tgt.position.y - e.position.y + (Math.random() - 0.5) * 3,
+                        z: tgt.position.z - e.position.z + (Math.random() - 0.5) * 3
+                    });
+                    room.enemyBullets.push({ id: 'eb' + Date.now() + Math.random() + k, position: { ...e.position }, dir, life: 4 });
+                }
+                const rapid = e.pattern === 'boss' ? (1 - hpRatio) * 12 : 0;
+                e.fireT = (e.pattern === 'boss' ? 26 : 50) + Math.floor(Math.random() * 30) - rapid;
             }
         }
     }
@@ -344,7 +430,9 @@ function tick(room) {
                     broadcastToRoom(room, { type: 'player_shield_hit', id: p.id });
                     break;
                 }
+                if (p.invuln > 0) break; // dokunulmazlık süresi — mermi geçer
                 p.health -= 10;
+                p.invuln = 15; // ~0.5 sn dokunulmazlık
                 if (p.health <= 0) { p.health = 0; p.alive = false; }
                 room.enemyBullets.splice(i, 1);
                 broadcastToRoom(room, { type: 'player_hit', id: p.id, health: p.health, alive: p.alive });
@@ -373,6 +461,16 @@ function tick(room) {
                     const p = room.players.get(b.ownerId);
                     if (p) p.score += e.score;
                     room.enemies.splice(j, 1);
+                    // %15 ihtimalle güç-yükseltme; boss her zaman bırakır
+                    if (e.pattern === 'boss') {
+                        room.powerups.push({ id: 'pu' + Date.now() + Math.random(), type: 'triple', position: { ...e.position }, life: 20 });
+                    } else if (Math.random() < 0.15) {
+                        room.powerups.push({
+                            id: 'pu' + Date.now() + Math.random(),
+                            type: ['triple', 'shield', 'health'][Math.floor(Math.random() * 3)],
+                            position: { ...e.position }, life: 15
+                        });
+                    }
                     broadcastToRoom(room, { type: 'enemy_destroyed', id: e.id, ownerId: b.ownerId, score: e.score });
                 }
                 break;
@@ -389,7 +487,9 @@ function tick(room) {
                         broadcastToRoom(room, { type: 'player_shield_hit', id: p.id });
                         break;
                     }
+                    if (p.invuln > 0) break; // dokunulmazlık
                     p.health -= b.damage;
+                    p.invuln = 15;
                     hitSomething = true;
                     if (p.health <= 0) {
                         p.health = 0;
@@ -430,22 +530,50 @@ function handleMessage(ws, raw) {
             break;
         case 'shoot':
             if (player.alive) {
-                room.bullets.push({
-                    id: 'b' + Date.now() + Math.random(),
-                    ownerId: player.id,
-                    position: { ...player.position },
-                    dir: msg.dir || { x: 0, y: 0, z: -1 },
-                    speed: msg.type2 === 'rocket' ? 45 : 66,
-                    damage: msg.damage || 10,
-                    life: 4
-                });
+                if (player.tripleTimer > 0) {
+                    // Güç-yükseltme: paralel 3 lü atış
+                    const base = msg.dir || { x: 0, y: 0, z: -1 };
+                    for (let k = -1; k <= 1; k++) {
+                        room.bullets.push({
+                            id: 'b' + Date.now() + Math.random() + k,
+                            ownerId: player.id,
+                            position: { ...player.position },
+                            dir: norm({ x: base.x - base.z * 0.4 * k, y: base.y, z: base.z + base.x * 0.4 * k }),
+                            speed: 66, damage: 7, life: 3, t2: 2
+                        });
+                    }
+                } else if (msg.type2 === 2) {
+                    // Spread silahı: sağa/sola iki çapraz ek mermi
+                    const base = msg.dir || { x: 0, y: 0, z: -1 };
+                    for (let k = -1; k <= 1; k++) {
+                        const d = norm({ x: base.x + k * 0.35, y: base.y, z: base.z });
+                        room.bullets.push({
+                            id: 'b' + Date.now() + Math.random() + k,
+                            ownerId: player.id,
+                            position: { ...player.position },
+                            dir: d, speed: 66, damage: 7, life: 3, t2: 2
+                        });
+                    }
+                } else {
+                    room.bullets.push({
+                        id: 'b' + Date.now() + Math.random(),
+                        ownerId: player.id,
+                        position: { ...player.position },
+                        dir: msg.dir || { x: 0, y: 0, z: -1 },
+                        speed: msg.type2 === 1 ? 45 : 66,
+                        damage: msg.damage || 10,
+                        life: 4,
+                        t2: msg.type2 || 0
+                    });
+                }
             }
             break;
         case 'use_shield':
-            if (player.alive && player.shield >= 10 && player.shieldActive <= 0) {
+            if (player.alive && player.shield >= 10 && player.shieldActive <= 0 && player.shieldCooldown <= 0) {
                 player.shield -= 10;
-                player.shieldActive = 5;
-                broadcastToRoom(room, { type: 'shield_used', id: player.id, shield: player.shield, shieldActive: player.shieldActive });
+                player.shieldActive = 7;      // 7 saniye aktif koruma
+                player.shieldCooldown = 20;   // 20 saniye bekleme
+                broadcastToRoom(room, { type: 'shield_used', id: player.id, shield: player.shield, shieldActive: player.shieldActive, shieldCooldown: player.shieldCooldown });
             }
             break;
         case 'chat':
