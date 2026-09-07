@@ -625,8 +625,8 @@ function handleMessage(ws, raw) {
 }
 
 // ===== AGAR MODU (2D blob — agar.io grafik + mekanik: bölün, yem at, virüs) =====
-const A_W = 4000, A_H = 4000;
-const A_FOOD_TARGET = 700;
+const A_W = 2000, A_H = 2000;
+const A_FOOD_TARGET = 1000;
 const AGAR_COLORS = ['#ff5555', '#4ecdc4', '#ffe66d', '#6c5ce7', '#fd79a8', '#00b894', '#fdcb6e', '#e17055', '#0984e3', '#a29bfe', '#ff9ff3', '#feca57'];
 const aPlayers = new Map(); // id -> { id, name, ws, color, cells:[], tx, ty, remergeUntil }
 let aFood = [];    // küçük yem noktaları
@@ -634,7 +634,7 @@ let aPellets = []; // fırlatılan kütle parçaları
 let aViruses = []; // yeşil virüsler
 let aFoodId = 1, aPelletId = 1, aVirusId = 1, aCellId = 1;
 
-function aR(mass) { return Math.sqrt(mass) * 2.2; }
+function aR(mass) { return Math.sqrt(mass) * 4; }
 function aPTotal(p) { return p.cells.reduce((s, c) => s + c.mass, 0); }
 
 function ensureFood() {
@@ -818,7 +818,7 @@ function agarTick() {
             const dx = p.tx - c.x, dy = p.ty - c.y;
             const d = Math.hypot(dx, dy);
             if (d > 18) {
-                const sp = Math.max(45, 160 * Math.sqrt(25 / c.mass));
+                const sp = Math.max(50, 335 * Math.sqrt(25 / c.mass));
                 const m = Math.min(sp * dt, d);
                 c.x += (dx / d) * m + c.vx * dt;
                 c.y += (dy / d) * m + c.vy * dt;
@@ -848,11 +848,11 @@ function agarTick() {
             const c = p.cells[ci];
             for (let i = aFood.length - 1; i >= 0; i--) {
                 const f = aFood[i];
-                if (Math.hypot(c.x - f.x, c.y - f.y) < c.r) { c.mass += f.m; c.r = aR(c.mass); aFood.splice(i, 1); eatenFood.push(f.id); }
+                if (Math.hypot(c.x - f.x, c.y - f.y) < c.r + f.r * 0.5) { c.mass += f.m; c.r = aR(c.mass); aFood.splice(i, 1); eatenFood.push(f.id); }
             }
             for (let i = aPellets.length - 1; i >= 0; i--) {
                 const f = aPellets[i];
-                if (c.mass > f.mass && Math.hypot(c.x - f.x, c.y - f.y) < c.r) {
+                if (c.mass > f.mass && Math.hypot(c.x - f.x, c.y - f.y) < c.r + f.r * 0.4) {
                     c.mass += f.mass; c.r = aR(c.mass);
                     aPellets.splice(i, 1);
                     broadcastA({ type: 'pellet_eaten', id: f.id });
