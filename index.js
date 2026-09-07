@@ -634,6 +634,12 @@ let aPellets = []; // fırlatılan kütle parçaları
 let aViruses = []; // yeşil virüsler
 let aFoodId = 1, aPelletId = 1, aVirusId = 1, aCellId = 1;
 
+// Feast event: her 3 dk'da bir 30 sn boyunca yem değerleri x2
+let feastMode = false;
+let feastEnd = 0;
+let feastGoldenId = null; // dev altın yem id
+let feastNext = Date.now() + 180000; // ilk feast 3 dk sonra
+
 function aR(mass) { return Math.sqrt(mass) * 4; }
 function aPTotal(p) { return p.cells.reduce((s, c) => s + c.mass, 0); }
 
@@ -664,6 +670,27 @@ function spawnVirusNearRandom() {
 }
 function ensureViruses() { while (aViruses.length < 12) aViruses.push(spawnVirusNearRandom()); }
 ensureViruses();
+
+// Feast event sistemi
+function startFeast() {
+    feastMode = true;
+    feastEnd = Date.now() + 30000;
+    feastGoldenId = 'gf' + Date.now();
+    // harita ortasına dev altın yem ekle
+    aFood.push({ id: feastGoldenId, x: A_W / 2, y: A_H / 2, r: 22, c: '#ffd700', m: 25 });
+    broadcastA({ type: 'feast_start', duration: 30 });
+}
+function endFeast() {
+    feastMode = false;
+    feastGoldenId = null;
+    feastNext = Date.now() + 180000; // 3 dk sonra tekrar
+    broadcastA({ type: 'feast_end' });
+}
+function feastTick() {
+    if (feastMode && Date.now() >= feastEnd) endFeast();
+    else if (!feastMode && Date.now() >= feastNext) startFeast();
+}
+setInterval(feastTick, 1000);
 
 function safeCellPos() {
     for (let tries = 0; tries < 40; tries++) {
@@ -848,7 +875,12 @@ function agarTick() {
             const c = p.cells[ci];
             for (let i = aFood.length - 1; i >= 0; i--) {
                 const f = aFood[i];
-                if (Math.hypot(c.x - f.x, c.y - f.y) < c.r + f.r * 0.5) { c.mass += f.m; c.r = aR(c.mass); aFood.splice(i, 1); eatenFood.push(f.id); }
+                if (Math.hypot(c.x - f.x, c.y - f.y) < c.r + f.r * 0.5) {
+                    const val = feastMode ? f.m * 2 : f.m;
+                    c.mass += val; c.r = aR(c.mass);
+                    aFood.splice(i, 1); eatenFood.push(f.id);
+                    if (f.id === feastGoldenId) { feastGoldenId = null; broadcastA({ type: 'golden_eaten', eater: p.name }); }
+                }
             }
             for (let i = aPellets.length - 1; i >= 0; i--) {
                 const f = aPellets[i];
@@ -899,6 +931,7 @@ function agarTick() {
                     sm.cells.push(newCell(sp2.x, sp2.y, 25));
                     sm.tx = sp2.x; sm.ty = sp2.y;
                     broadcastA({ type: 'eaten', eater: big.id, victim: sm.id, mass: Math.floor(aPTotal(big)) });
+                    broadcastA({ type: 'killfeed', killer: big.name, victim: sm.name });
                 }
             }
         }
@@ -915,7 +948,7 @@ function agarTick() {
                 for (let j = i + 1; j < cl.length && !changed; j++) {
                     const a = cl[i], b = cl[j];
                     const mx = Math.max(a.mass, b.mass), mn = Math.min(a.mass, b.mass);
-                    if (mx / mn < 1.015) continue;
+                    if (mx / mn <= 1.001) continue;
                     const big = a.mass >= b.mass ? a : b;
                     const small = a.mass >= b.mass ? b : a;
                     if (Math.hypot(big.x - small.x, big.y - small.y) < big.r - small.r * 0.6) {
