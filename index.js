@@ -20,6 +20,8 @@ const server = http.createServer((req, res) => {
         res.end(JSON.stringify({
             region: REGION,
             players: total,
+            space: totalSpacePlayers(),
+            agar: aPlayers.size,
             maxPlayers: MAX_PLAYERS,
             status: total >= MAX_PLAYERS ? 'full' : 'online',
             ping: 0
@@ -28,7 +30,7 @@ const server = http.createServer((req, res) => {
     }
 
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end(`Space Shooter - Online Sunucu (${REGION}) Çalışıyor\n`);
+    res.end(`Uzay + Agar oyun sunucu (${REGION}) Çalışıyor\n`);
 });
 
 const wss = new WebSocket.Server({ server });
@@ -41,6 +43,12 @@ const TICK_RATE = 30; // sunucu tik/sn
 const TICK_MS = 1000 / TICK_RATE;
 
 function totalPlayers() {
+    let total = 0;
+    for (const r of rooms.values()) total += r.players.size;
+    return total + aPlayers.size;
+}
+
+function totalSpacePlayers() {
     let total = 0;
     for (const r of rooms.values()) total += r.players.size;
     return total;
@@ -616,10 +624,177 @@ function handleMessage(ws, raw) {
     }
 }
 
+// ===== AGAR MODU (2D blob oyunu — aynı sunucu, ?mode=agar) =====
+const A_W = 4000, A_H = 4000;
+const A_FOOD_TARGET = 700;
+const AGAR_COLORS = ['#ff6b6b', '#4ecdc4', '#ffe66d', '#6c5ce7', '#fd79a8', '#00b894', '#fdcb6e', '#e17055', '#0984e3', '#a29bfe'];
+const aPlayers = new Map(); // id -> { id, name, ws, x, y, mass, color, tx, ty }
+let aFood = [];
+let aFoodId = 1;
+
+function ensureFood() {
+    while (aFood.length < A_FOOD_TARGET) {
+        aFood.push({ id: 'f' + (aFoodId++), x: Math.random() * A_W, y: Math.random() * A_H, r: 5, c: AGAR_COLORS[Math.floor(Math.random() * AGAR_COLORS.length)], m: 1 });
+    }
+}
+ensureFood();
+
+function agarRadius(mass) { return Math.sqrt(mass) * 2.2; }
+
+function resetAgarPos(p) {
+    let ok = false, tries = 0;
+    while (!ok && tries++ < 30) {
+        p.x = 200 + Math.random() * (A_W - 400);
+        p.y = 200 + Math.random() * (A_H - 400);
+        ok = true;
+        for (const o of aPlayers.values()) {
+            if (o === p) continue;
+            if (Math.hypot(o.x - p.x, o.y - p.y) < (agarRadius(o.mass) + agarRadius(p.mass)) * 1.6) { ok = false; break; }
+        }
+    }
+}
+
+function aSnap() {
+    return Array.from(aPlayers.values()).map(p => ({ id: p.id, name: p.name, x: p.x, y: p.y, r: Math.round(agarRadius(p.mass)), color: p.color, mass: Math.floor(p.mass) }));
+}
+
+function broadcastA(msg, exceptWs) {
+    const data = JSON.stringify(msg);
+    for (const p of aPlayers.values()) {
+        if (p.ws.readyState === WebSocket.OPEN && p.ws !== exceptWs) p.ws.send(data);
+    }
+}
+function sendA(p, msg) { if (p.ws.readyState === WebSocket.OPEN) p.ws.send(JSON.stringify(msg)); }
+
+function agarConnect(ws, name) {
+    if (aPlayers.size >= MAX_PLAYERS) {
+        ws.send(JSON.stringify({ type: 'server_full', region: REGION, maxPlayers: MAX_PLAYERS }));
+        setTimeout(() => ws.close(), 500);
+        return;
+    }
+    const id = 'a' + Date.now() + Math.floor(Math.random() * 1000);
+    const p = {
+        id, name: name || 'Oyuncu', ws,
+        x: 0, y: 0, mass: 25,
+        color: AGAR_COLORS[Math.floor(Math.random() * AGAR_COLORS.length)],
+        tx: null, ty: null
+    };
+    resetAgarPos(p);
+    p.tx = p.x; p.ty = p.y;
+    aPlayers.set(id, p);
+    ws._playerId = id;
+    ws._mode = 'agar';
+    ensureFood();
+    sendA(p, { type: 'board', W: A_W, H: A_H, me: id, region: REGION, players: aSnap(), food: aFood });
+    broadcastA({ type: 'player_joined', p: aSnap().find(s => s.id === id) }, ws);
+    console.log(`[+] ${p.name} (agar) katıldı`);
+}
+
+function agarHandleMessage(p, msg) {
+    switch (msg.type) {
+        case 'aim':
+            if (typeof msg.x === 'number' && typeof msg.y === 'number') {
+                p.tx = Math.max(0, Math.min(A_W, msg.x));
+                p.ty = Math.max(0, Math.min(A_H, msg.y));
+            }
+            break;
+        case 'chat':
+            broadcastA({ type: 'chat', id: p.id, name: p.name, text: String(msg.text).slice(0, 100) });
+            break;
+        case 'ping':
+            sendA(p, { type: 'pong', t: msg.t });
+            break;
+    }
+}
+
+function agarTick() {
+    if (aPlayers.size === 0) return;
+    ensureFood();
+    const dt = 0.1;
+
+    // Hareket + büyükse küçülme
+    for (const p of aPlayers.values()) {
+        p.mass = Math.max(25, p.mass - p.mass * 0.0008);
+        if (p.tx == null || p.ty == null) continue;
+        const dx = p.tx - p.x, dy = p.ty - p.y;
+        const d = Math.hypot(dx, dy);
+        if (d < 24) continue;
+        const sp = Math.max(45, 160 * Math.sqrt(25 / p.mass));
+        const m = Math.min(sp * dt, d);
+        p.x += (dx / d) * m;
+        p.y += (dy / d) * m;
+        p.x = Math.max(0, Math.min(A_W, p.x));
+        p.y = Math.max(0, Math.min(A_H, p.y));
+    }
+
+    // Yem toplama
+    const eatenFood = [];
+    for (const p of aPlayers.values()) {
+        const r = agarRadius(p.mass);
+        for (let i = aFood.length - 1; i >= 0; i--) {
+            const f = aFood[i];
+            if (Math.hypot(p.x - f.x, p.y - f.y) < r) {
+                p.mass += f.m;
+                aFood.splice(i, 1);
+                eatenFood.push(f.id);
+            }
+        }
+    }
+    if (eatenFood.length) broadcastA({ type: 'food_eaten', ids: eatenFood });
+
+    // Oyuncu yeme (büyük küçüğü yutar)
+    const list = Array.from(aPlayers.values());
+    for (const big of list) {
+        if (!aPlayers.has(big.id)) continue;
+        const rb = agarRadius(big.mass);
+        for (const small of list) {
+            if (big === small || !aPlayers.has(small.id)) continue;
+            const rs = agarRadius(small.mass);
+            if (rb / rs < 1.2) continue;
+            if (Math.hypot(big.x - small.x, big.y - small.y) < rb - rs * 0.4) {
+                big.mass += small.mass;
+                small.mass = 25;
+                resetAgarPos(small);
+                small.tx = small.x; small.ty = small.y;
+                broadcastA({ type: 'eaten', eater: big.id, victim: small.id, mass: big.mass });
+            }
+        }
+    }
+
+    // Lider + durum
+    const lb = Array.from(aPlayers.values())
+        .sort((a, b) => b.mass - a.mass)
+        .slice(0, 10)
+        .map(p => ({ name: p.name, mass: Math.floor(p.mass) }));
+    broadcastA({ type: 'state', players: aSnap(), leaderboard: lb });
+}
+
+setInterval(agarTick, 100);
+
 // ===== WS BAĞLANTISI =====
 wss.on('connection', (ws, req) => {
     const q = url.parse(req.url, true);
     const name = q.query.name || 'Oyuncu';
+
+    // AGAR modu (2D blob): aynı sunucu, farklı oyun
+    if (q.query.mode === 'agar') {
+        agarConnect(ws, name);
+        ws.on('message', (data) => {
+            const p = aPlayers.get(ws._playerId);
+            let msg;
+            try { msg = JSON.parse(data.toString()); } catch (e) { return; }
+            if (p && msg && msg.type) agarHandleMessage(p, msg);
+        });
+        ws.on('close', () => {
+            const p = aPlayers.get(ws._playerId);
+            if (p) {
+                console.log(`[-] ${p.name} (agar) ayrıldı`);
+                aPlayers.delete(ws._playerId);
+                broadcastA({ type: 'player_left', id: ws._playerId });
+            }
+        });
+        return;
+    }
 
     const player = playerJoin(ws, name);
     if (!player) return; // sunucu dolu
@@ -646,7 +821,7 @@ setInterval(() => {
 }, TICK_MS);
 
 server.listen(PORT, () => {
-    console.log(`Space Shooter online sunucu ${PORT} portunda çalışıyor`);
+    console.log(`Uzay + Agar oyun sunucu ${PORT} portunda çalışıyor`);
 });
 
 // Uygulama kapanınca temiz
