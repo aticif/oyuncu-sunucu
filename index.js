@@ -115,7 +115,9 @@ function playerJoin(ws, name) {
         health: 100,
         score: 0,
         alive: true,
-        color: pickColor(room)
+        color: pickColor(room),
+        shield: 100,
+        shieldActive: 0
     };
 
     room.players.set(id, player);
@@ -131,7 +133,8 @@ function playerJoin(ws, name) {
         maxPlayers: MAX_PLAYERS,
         players: Array.from(room.players.values()).map(p => ({
             id: p.id, name: p.name, position: p.position, rotation: p.rotation,
-            health: p.health, score: p.score, color: p.color, alive: p.alive
+            health: p.health, score: p.score, color: p.color, alive: p.alive,
+            shield: p.shield, shieldActive: p.shieldActive
         })),
         wave: room.wave,
         isBossWave: room.isBossWave
@@ -182,7 +185,8 @@ function broadcastState(room) {
         type: 'state',
         players: Array.from(room.players.values()).map(p => ({
             id: p.id, name: p.name, position: p.position, rotation: p.rotation,
-            health: p.health, score: p.score, color: p.color, alive: p.alive
+            health: p.health, score: p.score, color: p.color, alive: p.alive,
+            shield: p.shield, shieldActive: p.shieldActive
         })),
         enemies: room.enemies.map(e => ({
             id: e.id, type: e.type, position: e.position, hp: e.hp, maxHp: e.maxHp, size: e.size
@@ -247,6 +251,12 @@ function roomCenter(room) {
 
 // ===== TİK DÖNGÜSÜ =====
 function tick(room) {
+    // Kalkan aktif süresini azalt
+    for (const p of room.players.values()) {
+        if (p.shieldActive > 0) {
+            p.shieldActive = Math.max(0, p.shieldActive - 0.03);
+        }
+    }
     // Spawn queue
     if (room.spawnQueue.length > 0) {
         room.spawnTimer--;
@@ -307,6 +317,11 @@ function tick(room) {
         for (const p of room.players.values()) {
             if (!p.alive) continue;
             if (Math.hypot(p.position.x - b.position.x, p.position.y - b.position.y, p.position.z - b.position.z) < 2.2) {
+                if (p.shieldActive > 0) {
+                    room.enemyBullets.splice(i, 1);
+                    broadcastToRoom(room, { type: 'player_shield_hit', id: p.id });
+                    break;
+                }
                 p.health -= 10;
                 if (p.health <= 0) { p.health = 0; p.alive = false; }
                 room.enemyBullets.splice(i, 1);
@@ -347,6 +362,11 @@ function tick(room) {
             for (const p of room.players.values()) {
                 if (p.id === b.ownerId || !p.alive) continue;
                 if (Math.hypot(p.position.x - b.position.x, p.position.y - b.position.y, p.position.z - b.position.z) < 2.4) {
+                    if (p.shieldActive > 0) {
+                        hitSomething = true;
+                        broadcastToRoom(room, { type: 'player_shield_hit', id: p.id });
+                        break;
+                    }
                     p.health -= b.damage;
                     hitSomething = true;
                     if (p.health <= 0) {
@@ -397,6 +417,13 @@ function handleMessage(ws, raw) {
                     damage: msg.damage || 10,
                     life: 4
                 });
+            }
+            break;
+        case 'use_shield':
+            if (player.alive && player.shield >= 10 && player.shieldActive <= 0) {
+                player.shield -= 10;
+                player.shieldActive = 5;
+                broadcastToRoom(room, { type: 'shield_used', id: player.id, shield: player.shield, shieldActive: player.shieldActive });
             }
             break;
         case 'chat':
