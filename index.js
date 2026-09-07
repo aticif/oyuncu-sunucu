@@ -624,38 +624,68 @@ function handleMessage(ws, raw) {
     }
 }
 
-// ===== AGAR MODU (2D blob oyunu — aynı sunucu, ?mode=agar) =====
+// ===== AGAR MODU (2D blob — agar.io grafik + mekanik: bölün, yem at, virüs) =====
 const A_W = 4000, A_H = 4000;
 const A_FOOD_TARGET = 700;
-const AGAR_COLORS = ['#ff6b6b', '#4ecdc4', '#ffe66d', '#6c5ce7', '#fd79a8', '#00b894', '#fdcb6e', '#e17055', '#0984e3', '#a29bfe'];
-const aPlayers = new Map(); // id -> { id, name, ws, x, y, mass, color, tx, ty }
-let aFood = [];
-let aFoodId = 1;
+const AGAR_COLORS = ['#ff5555', '#4ecdc4', '#ffe66d', '#6c5ce7', '#fd79a8', '#00b894', '#fdcb6e', '#e17055', '#0984e3', '#a29bfe', '#ff9ff3', '#feca57'];
+const aPlayers = new Map(); // id -> { id, name, ws, color, cells:[], tx, ty, remergeUntil }
+let aFood = [];    // küçük yem noktaları
+let aPellets = []; // fırlatılan kütle parçaları
+let aViruses = []; // yeşil virüsler
+let aFoodId = 1, aPelletId = 1, aVirusId = 1, aCellId = 1;
+
+function aR(mass) { return Math.sqrt(mass) * 2.2; }
+function aPTotal(p) { return p.cells.reduce((s, c) => s + c.mass, 0); }
 
 function ensureFood() {
     while (aFood.length < A_FOOD_TARGET) {
-        aFood.push({ id: 'f' + (aFoodId++), x: Math.random() * A_W, y: Math.random() * A_H, r: 5, c: AGAR_COLORS[Math.floor(Math.random() * AGAR_COLORS.length)], m: 1 });
+        const big = Math.random() < 0.08; // %8 büyük (renkli) yem
+        aFood.push({
+            id: 'f' + (aFoodId++),
+            x: Math.random() * A_W, y: Math.random() * A_H,
+            r: big ? 12 : 3 + Math.random() * 2,
+            c: Math.random() < 0.65 ? '#ddf2ff' : AGAR_COLORS[Math.floor(Math.random() * AGAR_COLORS.length)],
+            m: big ? 2 : 1
+        });
     }
 }
 ensureFood();
 
-function agarRadius(mass) { return Math.sqrt(mass) * 2.2; }
-
-function resetAgarPos(p) {
-    let ok = false, tries = 0;
-    while (!ok && tries++ < 30) {
-        p.x = 200 + Math.random() * (A_W - 400);
-        p.y = 200 + Math.random() * (A_H - 400);
-        ok = true;
-        for (const o of aPlayers.values()) {
-            if (o === p) continue;
-            if (Math.hypot(o.x - p.x, o.y - p.y) < (agarRadius(o.mass) + agarRadius(p.mass)) * 1.6) { ok = false; break; }
+function spawnVirusNearRandom() {
+    for (let tries = 0; tries < 40; tries++) {
+        const v = { id: 'vr' + (aVirusId++), x: 150 + Math.random() * (A_W - 300), y: 150 + Math.random() * (A_H - 300), r: 26 };
+        let bad = false;
+        for (const p of aPlayers.values()) for (const c of p.cells) {
+            if (Math.hypot(v.x - c.x, v.y - c.y) < 330) { bad = true; break; }
         }
+        if (!bad) return v;
     }
+    return { id: 'vr' + (aVirusId++), x: Math.random() * A_W, y: Math.random() * A_H, r: 26 };
+}
+function ensureViruses() { while (aViruses.length < 12) aViruses.push(spawnVirusNearRandom()); }
+ensureViruses();
+
+function safeCellPos() {
+    for (let tries = 0; tries < 40; tries++) {
+        const x = 300 + Math.random() * (A_W - 600);
+        const y = 300 + Math.random() * (A_H - 600);
+        let bad = false;
+        for (const p of aPlayers.values()) for (const c of p.cells) {
+            if (Math.hypot(c.x - x, c.y - y) < aR(c.mass) * 2 + 70) { bad = true; break; }
+        }
+        if (!bad) return { x, y };
+    }
+    return { x: A_W / 2, y: A_H / 2 };
+}
+function newCell(x, y, mass, vx, vy) {
+    return { i: aCellId++, x, y, mass, r: aR(mass), vx: vx || 0, vy: vy || 0 };
 }
 
 function aSnap() {
-    return Array.from(aPlayers.values()).map(p => ({ id: p.id, name: p.name, x: p.x, y: p.y, r: Math.round(agarRadius(p.mass)), color: p.color, mass: Math.floor(p.mass) }));
+    return Array.from(aPlayers.values()).map(p => ({
+        id: p.id, name: p.name, color: p.color, mass: Math.floor(aPTotal(p)),
+        cells: p.cells.map(c => ({ x: Math.round(c.x), y: Math.round(c.y), r: Math.round(c.r), mass: Math.round(c.mass) }))
+    }));
 }
 
 function broadcastA(msg, exceptWs) {
@@ -673,21 +703,72 @@ function agarConnect(ws, name) {
         return;
     }
     const id = 'a' + Date.now() + Math.floor(Math.random() * 1000);
+    const sp = safeCellPos();
     const p = {
         id, name: name || 'Oyuncu', ws,
-        x: 0, y: 0, mass: 25,
         color: AGAR_COLORS[Math.floor(Math.random() * AGAR_COLORS.length)],
-        tx: null, ty: null
+        cells: [], tx: sp.x, ty: sp.y, remergeUntil: 0
     };
-    resetAgarPos(p);
-    p.tx = p.x; p.ty = p.y;
+    p.cells.push(newCell(sp.x, sp.y, 25));
     aPlayers.set(id, p);
     ws._playerId = id;
     ws._mode = 'agar';
-    ensureFood();
-    sendA(p, { type: 'board', W: A_W, H: A_H, me: id, region: REGION, players: aSnap(), food: aFood });
+    ensureFood(); ensureViruses();
+    sendA(p, {
+        type: 'board', W: A_W, H: A_H, me: id, region: REGION,
+        players: aSnap(),
+        food: aFood,
+        pellets: aPellets.map(f => ({ id: f.id, x: f.x, y: f.y, r: f.r, vx: f.vx, vy: f.vy, color: f.color || '#bfe0a0' })),
+        viruses: aViruses.map(v => ({ id: v.id, x: v.x, y: v.y, r: v.r }))
+    });
     broadcastA({ type: 'player_joined', p: aSnap().find(s => s.id === id) }, ws);
     console.log(`[+] ${p.name} (agar) katıldı`);
+}
+
+function agarSplit(p) {
+    if (p.cells.length >= 8) return;
+    let spawned = 0;
+    for (const c of p.cells.slice()) {
+        if (c.mass < 36) continue;
+        const dx = p.tx - c.x, dy = p.ty - c.y;
+        const d = Math.hypot(dx, dy) || 1;
+        const ux = dx / d, uy = dy / d;
+        const half = c.mass / 2;
+        c.mass = half; c.r = aR(half);
+        p.cells.push(newCell(c.x + ux * c.r * 1.4, c.y + uy * c.r * 1.4, half, ux * 150, uy * 150));
+        spawned++;
+        if (p.cells.length >= 8) break;
+    }
+    if (spawned) p.remergeUntil = Date.now() + Math.min(30000, 4000 + aPTotal(p) * 8);
+}
+
+function agarEject(p) {
+    let c = null, cm = -1;
+    for (const cc of p.cells) if (cc.mass > cm) { cm = cc.mass; c = cc; }
+    if (!c || c.mass < 40) return;
+    const dx = p.tx - c.x, dy = p.ty - c.y;
+    const d = Math.hypot(dx, dy) || 1;
+    const ux = dx / d, uy = dy / d;
+    c.mass -= 14; c.r = aR(c.mass);
+    const pel = { id: 'ap' + (aPelletId++), x: c.x + ux * (c.r + 10), y: c.y + uy * (c.r + 10), r: 7, mass: 14, vx: ux * 220, vy: uy * 220, born: Date.now(), color: p.color };
+    aPellets.push(pel);
+    c.vx -= ux * 30; c.vy -= uy * 30;
+    broadcastA({ type: 'ejected', pellet: { id: pel.id, x: pel.x, y: pel.y, r: pel.r, vx: pel.vx, vy: pel.vy, color: pel.color } });
+}
+
+function agarExplodeCell(p, c) {
+    const idx = p.cells.indexOf(c);
+    if (idx < 0) return;
+    p.cells.splice(idx, 1);
+    const nPieces = Math.max(2, Math.min(8, 16 - p.cells.length));
+    if (nPieces < 2) { p.cells.push(newCell(c.x, c.y, Math.max(25, c.mass))); return; }
+    const pm = Math.max(20, c.mass / nPieces);
+    for (let k = 0; k < nPieces; k++) {
+        const a = Math.random() * Math.PI * 2;
+        p.cells.push(newCell(Math.max(c.r, Math.min(A_W - c.r, c.x + Math.cos(a) * 10)), Math.max(c.r, Math.min(A_H - c.r, c.y + Math.sin(a) * 10)), pm, Math.cos(a) * 190, Math.sin(a) * 190));
+    }
+    p.remergeUntil = Date.now() + Math.min(30000, 4000 + aPTotal(p) * 8);
+    broadcastA({ type: 'spray', x: c.x, y: c.y, color: p.color, n: 22 });
 }
 
 function agarHandleMessage(p, msg) {
@@ -697,6 +778,12 @@ function agarHandleMessage(p, msg) {
                 p.tx = Math.max(0, Math.min(A_W, msg.x));
                 p.ty = Math.max(0, Math.min(A_H, msg.y));
             }
+            break;
+        case 'split':
+            agarSplit(p);
+            break;
+        case 'eject':
+            agarEject(p);
             break;
         case 'chat':
             broadcastA({ type: 'chat', id: p.id, name: p.name, text: String(msg.text).slice(0, 100) });
@@ -712,60 +799,141 @@ function agarTick() {
     ensureFood();
     const dt = 0.1;
 
-    // Hareket + büyükse küçülme
+    // Hareket: her hücre hedefe gider, fırlatma impulsu söner
     for (const p of aPlayers.values()) {
-        p.mass = Math.max(25, p.mass - p.mass * 0.0008);
-        if (p.tx == null || p.ty == null) continue;
-        const dx = p.tx - p.x, dy = p.ty - p.y;
-        const d = Math.hypot(dx, dy);
-        if (d < 24) continue;
-        const sp = Math.max(45, 160 * Math.sqrt(25 / p.mass));
-        const m = Math.min(sp * dt, d);
-        p.x += (dx / d) * m;
-        p.y += (dy / d) * m;
-        p.x = Math.max(0, Math.min(A_W, p.x));
-        p.y = Math.max(0, Math.min(A_H, p.y));
+        for (const c of p.cells) {
+            c.vx *= 0.88; c.vy *= 0.88;
+            // aynı oyuncunun hücrelerini ayır (üst üste binmesin)
+            for (const o of p.cells) {
+                if (o === c) continue;
+                const sx = c.x - o.x, sy = c.y - o.y;
+                const sd = Math.hypot(sx, sy);
+                const minD = (c.r + o.r) * 0.72;
+                if (sd < minD) {
+                    const push = (minD - sd) * 0.2;
+                    c.x += (sx / (sd || 1)) * push;
+                    c.y += (sy / (sd || 1)) * push;
+                }
+            }
+            const dx = p.tx - c.x, dy = p.ty - c.y;
+            const d = Math.hypot(dx, dy);
+            if (d > 18) {
+                const sp = Math.max(45, 160 * Math.sqrt(25 / c.mass));
+                const m = Math.min(sp * dt, d);
+                c.x += (dx / d) * m + c.vx * dt;
+                c.y += (dy / d) * m + c.vy * dt;
+            } else {
+                c.x += c.vx * dt; c.y += c.vy * dt;
+            }
+            c.x = Math.max(c.r, Math.min(A_W - c.r, c.x));
+            c.y = Math.max(c.r, Math.min(A_H - c.r, c.y));
+            c.mass = Math.max(25, c.mass - c.mass * 0.0007);
+            c.r = aR(c.mass);
+        }
     }
 
-    // Yem toplama
+    // Fırlatılan kütle parçaları
+    for (const f of aPellets) {
+        f.x += f.vx * dt; f.y += f.vy * dt;
+        f.vx *= 0.9; f.vy *= 0.9;
+        f.x = Math.max(f.r, Math.min(A_W - f.r, f.x));
+        f.y = Math.max(f.r, Math.min(A_H - f.r, f.y));
+    }
+    aPellets = aPellets.filter(f => Date.now() - f.born < 45000);
+
+    // Yem + parça toplama + virüs
     const eatenFood = [];
     for (const p of aPlayers.values()) {
-        const r = agarRadius(p.mass);
-        for (let i = aFood.length - 1; i >= 0; i--) {
-            const f = aFood[i];
-            if (Math.hypot(p.x - f.x, p.y - f.y) < r) {
-                p.mass += f.m;
-                aFood.splice(i, 1);
-                eatenFood.push(f.id);
+        for (let ci = 0; ci < p.cells.length; ci++) {
+            const c = p.cells[ci];
+            for (let i = aFood.length - 1; i >= 0; i--) {
+                const f = aFood[i];
+                if (Math.hypot(c.x - f.x, c.y - f.y) < c.r) { c.mass += f.m; c.r = aR(c.mass); aFood.splice(i, 1); eatenFood.push(f.id); }
+            }
+            for (let i = aPellets.length - 1; i >= 0; i--) {
+                const f = aPellets[i];
+                if (c.mass > f.mass && Math.hypot(c.x - f.x, c.y - f.y) < c.r) {
+                    c.mass += f.mass; c.r = aR(c.mass);
+                    aPellets.splice(i, 1);
+                    broadcastA({ type: 'pellet_eaten', id: f.id });
+                }
+            }
+            // Virüs: büyük hücre patlar
+            if (c.mass >= 100) {
+                for (let k = aViruses.length - 1; k >= 0; k--) {
+                    const v = aViruses[k];
+                    if (Math.hypot(c.x - v.x, c.y - v.y) < c.r * 0.7 + v.r * 0.5) {
+                        aViruses.splice(k, 1);
+                        broadcastA({ type: 'virus_eaten', vid: v.id, x: v.x, y: v.y });
+                        const nv = spawnVirusNearRandom();
+                        aViruses.push(nv);
+                        broadcastA({ type: 'virus_add', v: { id: nv.id, x: nv.x, y: nv.y, r: nv.r } });
+                        agarExplodeCell(p, c);
+                        ci--;
+                        break;
+                    }
+                }
             }
         }
     }
     if (eatenFood.length) broadcastA({ type: 'food_eaten', ids: eatenFood });
 
-    // Oyuncu yeme (büyük küçüğü yutar)
-    const list = Array.from(aPlayers.values());
-    for (const big of list) {
-        if (!aPlayers.has(big.id)) continue;
-        const rb = agarRadius(big.mass);
-        for (const small of list) {
-            if (big === small || !aPlayers.has(small.id)) continue;
-            const rs = agarRadius(small.mass);
-            if (rb / rs < 1.2) continue;
-            if (Math.hypot(big.x - small.x, big.y - small.y) < rb - rs * 0.4) {
-                big.mass += small.mass;
-                small.mass = 25;
-                resetAgarPos(small);
-                small.tx = small.x; small.ty = small.y;
-                broadcastA({ type: 'eaten', eater: big.id, victim: small.id, mass: big.mass });
+    // Oyuncu hücresi yeme (büyük, küçük hücreyi yutar)
+    const plist = Array.from(aPlayers.values());
+    for (const big of plist) {
+        for (const bcell of big.cells) {
+            for (const sm of plist) {
+                if (big === sm) continue;
+                for (let si = sm.cells.length - 1; si >= 0; si--) {
+                    const sc = sm.cells[si];
+                    if (bcell.mass / sc.mass < 1.2) continue;
+                    const d = Math.hypot(bcell.x - sc.x, bcell.y - sc.y);
+                    if (d < bcell.r - sc.r * 0.4) {
+                        bcell.mass += sc.mass; bcell.r = aR(bcell.mass);
+                        sm.cells.splice(si, 1);
+                        broadcastA({ type: 'spray', x: sc.x, y: sc.y, color: sm.color, n: 16 });
+                    }
+                }
+                if (sm.cells.length === 0 && aPlayers.has(sm.id)) {
+                    const sp2 = safeCellPos();
+                    sm.cells.push(newCell(sp2.x, sp2.y, 25));
+                    sm.tx = sp2.x; sm.ty = sp2.y;
+                    broadcastA({ type: 'eaten', eater: big.id, victim: sm.id, mass: Math.floor(aPTotal(big)) });
+                }
+            }
+        }
+    }
+
+    // Kendi hücrelerini birleştir (süre bitince)
+    for (const p of aPlayers.values()) {
+        if (p.cells.length <= 1 || p.remergeUntil > Date.now()) continue;
+        let changed = true;
+        while (changed) {
+            changed = false;
+            const cl = p.cells.slice();
+            for (let i = 0; i < cl.length && !changed; i++) {
+                for (let j = i + 1; j < cl.length && !changed; j++) {
+                    const a = cl[i], b = cl[j];
+                    const mx = Math.max(a.mass, b.mass), mn = Math.min(a.mass, b.mass);
+                    if (mx / mn < 1.015) continue;
+                    const big = a.mass >= b.mass ? a : b;
+                    const small = a.mass >= b.mass ? b : a;
+                    if (Math.hypot(big.x - small.x, big.y - small.y) < big.r - small.r * 0.6) {
+                        big.mass += small.mass; big.r = aR(big.mass);
+                        p.cells = p.cells.filter(cr => cr !== small);
+                        changed = true;
+                        break;
+                    }
+                }
             }
         }
     }
 
     // Lider + durum
     const lb = Array.from(aPlayers.values())
+        .map(p => ({ id: p.id, name: p.name, mass: Math.floor(aPTotal(p)) }))
         .sort((a, b) => b.mass - a.mass)
-        .slice(0, 10)
-        .map(p => ({ id: p.id, name: p.name, mass: Math.floor(p.mass) }));
+        .slice(0, 10);
     broadcastA({ type: 'state', players: aSnap(), leaderboard: lb });
 }
 
