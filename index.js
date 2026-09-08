@@ -4,7 +4,7 @@ const url = require('url');
 
 const PORT = process.env.PORT || 3000;
 const REGION = process.env.REGION || 'local';  // ör: tokyo, istanbul, frankfurt
-const MAX_PLAYERS = parseInt(process.env.MAX_PLAYERS || '40', 10); // sunucu başına maksimum oyuncu
+const MAX_PLAYERS = parseInt(process.env.MAX_PLAYERS || '60', 10); // sunucu başına maksimum oyuncu
 
 const server = http.createServer((req, res) => {
     const path = url.parse(req.url).pathname;
@@ -720,13 +720,15 @@ function aSnap() {
 function broadcastA(msg, exceptWs) {
     const data = JSON.stringify(msg);
     for (const p of aPlayers.values()) {
-        if (p.ws.readyState === WebSocket.OPEN && p.ws !== exceptWs) p.ws.send(data);
+        if (!p.ws || p.ws.readyState !== WebSocket.OPEN || p.ws === exceptWs) continue;
+        p.ws.send(data);
     }
 }
-function sendA(p, msg) { if (p.ws.readyState === WebSocket.OPEN) p.ws.send(JSON.stringify(msg)); }
+function sendA(p, msg) { if (p.ws && p.ws.readyState === WebSocket.OPEN) p.ws.send(JSON.stringify(msg)); }
 
 function agarConnect(ws, name) {
-    if (aPlayers.size >= MAX_PLAYERS) {
+    const realPlayers = Array.from(aPlayers.values()).filter(p => !p.isBot).length;
+    if (realPlayers >= MAX_PLAYERS) {
         ws.send(JSON.stringify({ type: 'server_full', region: REGION, maxPlayers: MAX_PLAYERS }));
         setTimeout(() => ws.close(), 500);
         return;
@@ -783,9 +785,9 @@ function agarEject(p) {
     const d = Math.hypot(dx, dy) || 1;
     const ux = dx / d, uy = dy / d;
     c.mass -= 18; c.r = aR(c.mass);
-    const pel = { id: 'ap' + (aPelletId++), x: c.x + ux * (c.r + 10), y: c.y + uy * (c.r + 10), r: 7, mass: 14, vx: ux * 220, vy: uy * 220, born: Date.now(), color: p.color };
+    const pel = { id: 'ap' + (aPelletId++), x: c.x + ux * (c.r + 10), y: c.y + uy * (c.r + 10), r: 7, mass: 14, vx: ux * 700, vy: uy * 700, born: Date.now(), color: p.color };
     aPellets.push(pel);
-    c.vx -= ux * 30; c.vy -= uy * 30;
+    c.vx -= ux * 60; c.vy -= uy * 60;
     broadcastA({ type: 'ejected', pellet: { id: pel.id, x: pel.x, y: pel.y, r: pel.r, vx: pel.vx, vy: pel.vy, color: pel.color } });
 }
 
@@ -868,7 +870,7 @@ function agarTick() {
     // Fırlatılan kütle parçaları
     for (const f of aPellets) {
         f.x += f.vx * dt; f.y += f.vy * dt;
-        f.vx *= 0.9; f.vy *= 0.9;
+        f.vx *= 0.96; f.vy *= 0.96;
         // Magnetic pellets: feast son 5sn'de en yakın oyuncuya çek
         if (feastMode && Date.now() > feastEnd - 5000 && aPlayers.size > 0) {
             let nearP = null, nearD = 99999;
@@ -949,10 +951,14 @@ function agarTick() {
                     }
                 }
                 if (sm.cells.length === 0 && aPlayers.has(sm.id)) {
-                    const sp2 = safeCellPos();
-                    sm.cells.push(newCell(sp2.x, sp2.y, 25));
-                    sm.tx = sp2.x; sm.ty = sp2.y;
-                    sm.invulnUntil = Date.now() + 3000; // 3 sn dokunulmazlik
+                    if (sm.isBot) {
+                        botOnEaten(sm);
+                    } else {
+                        const sp2 = safeCellPos();
+                        sm.cells.push(newCell(sp2.x, sp2.y, 25));
+                        sm.tx = sp2.x; sm.ty = sp2.y;
+                        sm.invulnUntil = Date.now() + 3000;
+                    }
                     broadcastA({ type: 'eaten', eater: big.id, victim: sm.id, mass: Math.floor(aPTotal(big)) });
                     broadcastA({ type: 'killfeed', killer: big.name, victim: sm.name });
                     // Chain combo: split'ten 3sn sonra yutma
@@ -1007,6 +1013,144 @@ let lastStateBroadcast = 0;
 }
 
 setInterval(agarTick, 100);
+
+// ===== BOT SİSTEMİ =====
+const BOT_NAMES = ['BotAli','BlobKing','NomNom','xX_Pro','YemCani','GigaBlob','小小','FastEater','Reis','VirusLover','Shadow','Hunter','ProGamer','Noob','Master','Alpha','Omega','Phoenix','Dragon','Ninja','Samurai','Pirate','Knight','Wizard','Ghost'];
+const aBots = new Map();
+const BOT_TARGET = 5;
+
+function botSpawn() {
+    const id = 'bot' + Date.now() + Math.floor(Math.random() * 10000);
+    const sp = safeCellPos();
+    const mass = 25 + Math.floor(Math.random() * 75);
+    const p = {
+        id, name: BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)],
+        color: AGAR_COLORS[Math.floor(Math.random() * AGAR_COLORS.length)],
+        cells: [newCell(sp.x, sp.y, mass)],
+        tx: sp.x, ty: sp.y,
+        remergeUntil: 0, lastSplitTime: 0, chainCombo: 0,
+        invulnUntil: Date.now() + 2000,
+        isBot: true,
+        aiTarget: null,
+        aiTimer: 0,
+        aiState: 'wander',
+        splitCooldown: 0
+    };
+    aPlayers.set(id, p);
+    aBots.set(id, p);
+    return p;
+}
+
+function botEnsure() {
+    while (aBots.size < BOT_TARGET) botSpawn();
+}
+botEnsure();
+setInterval(botEnsure, 5000);
+
+function botFindNearestFood(bot) {
+    const c = bot.cells[0];
+    if (!c) return null;
+    let best = null, bestD = 600;
+    for (const f of aFood) {
+        const d = Math.hypot(f.x - c.x, f.y - c.y);
+        if (d < bestD) { bestD = d; best = f; }
+    }
+    return best;
+}
+
+function botFindThreat(bot) {
+    const c = bot.cells[0];
+    if (!c) return null;
+    let worst = null, worstD = 400;
+    for (const p of aPlayers.values()) {
+        if (p.id === bot.id) continue;
+        for (const pc of p.cells) {
+            if (pc.mass > c.mass * 1.2) {
+                const d = Math.hypot(pc.x - c.x, pc.y - c.y);
+                if (d < worstD) { worstD = d; worst = pc; }
+            }
+        }
+    }
+    return worst;
+}
+
+function botFindPrey(bot) {
+    const c = bot.cells[0];
+    if (!c || c.mass < 60) return null;
+    let best = null, bestD = 350;
+    for (const p of aPlayers.values()) {
+        if (p.id === bot.id) continue;
+        for (const pc of p.cells) {
+            if (c.mass / pc.mass > 1.3) {
+                const d = Math.hypot(pc.x - c.x, pc.y - c.y);
+                if (d < bestD) { bestD = d; best = pc; }
+            }
+        }
+    }
+    return best;
+}
+
+function botThink(bot) {
+    const now = Date.now();
+    if (now < bot.aiTimer) return;
+    bot.aiTimer = now + 200 + Math.random() * 300;
+
+    const c = bot.cells[0];
+    if (!c) return;
+
+    const threat = botFindThreat(bot);
+    if (threat) {
+        bot.aiState = 'flee';
+        const dx = c.x - threat.x, dy = c.y - threat.y;
+        const d = Math.hypot(dx, dy) || 1;
+        bot.tx = c.x + (dx / d) * 500;
+        bot.ty = c.y + (dy / d) * 500;
+        bot.tx = Math.max(50, Math.min(A_W - 50, bot.tx));
+        bot.ty = Math.max(50, Math.min(A_H - 50, bot.ty));
+        return;
+    }
+
+    const prey = botFindPrey(bot);
+    if (prey && now > bot.splitCooldown) {
+        bot.aiState = 'hunt';
+        bot.tx = prey.x;
+        bot.ty = prey.y;
+        const d = Math.hypot(prey.x - c.x, prey.y - c.y);
+        if (d < c.r * 3 && c.mass > 70 && bot.cells.length < 4 && Math.random() < 0.03) {
+            agarSplit(bot);
+            bot.splitCooldown = now + 4000;
+        }
+        return;
+    }
+
+    const food = botFindNearestFood(bot);
+    if (food) {
+        bot.aiState = 'eat';
+        bot.tx = food.x + (Math.random() - 0.5) * 30;
+        bot.ty = food.y + (Math.random() - 0.5) * 30;
+        return;
+    }
+
+    if (now > bot.aiTimer + 500 || Math.hypot(bot.tx - c.x, bot.ty - c.y) < 50) {
+        bot.aiState = 'wander';
+        bot.tx = 200 + Math.random() * (A_W - 400);
+        bot.ty = 200 + Math.random() * (A_H - 400);
+    }
+}
+
+setInterval(() => {
+    for (const bot of aBots.values()) {
+        botThink(bot);
+    }
+}, 150);
+
+function botOnEaten(bot) {
+    const sp = safeCellPos();
+    bot.cells = [newCell(sp.x, sp.y, 25 + Math.floor(Math.random() * 50))];
+    bot.tx = sp.x; bot.ty = sp.y;
+    bot.invulnUntil = Date.now() + 3000;
+    bot.remergeUntil = 0;
+}
 
 // ===== WS BAĞLANTISI =====
 wss.on('connection', (ws, req) => {
