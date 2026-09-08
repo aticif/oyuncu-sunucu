@@ -829,6 +829,7 @@ function agarHandleMessage(p, msg) {
     }
 }
 
+let lastStateBroadcast = 0;
 function agarTick() {
     if (aPlayers.size === 0) return;
     if (aFood.length < A_FOOD_TARGET - 100) ensureFood();
@@ -1001,7 +1002,6 @@ function agarTick() {
     }
 
     // Lider + durum (5x/sn throttle)
-let lastStateBroadcast = 0;
     const now = Date.now();
     if (now - lastStateBroadcast < 200) return;
     lastStateBroadcast = now;
