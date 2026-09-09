@@ -833,7 +833,7 @@ let lastStateBroadcast = 0;
 function agarTick() {
     if (aPlayers.size === 0) return;
     if (aFood.length < A_FOOD_TARGET - 100) ensureFood();
-    const dt = 0.1;
+    const dt = 0.2;
 
     for (const p of aPlayers.values()) {
         for (const c of p.cells) {
@@ -986,7 +986,7 @@ function agarTick() {
     broadcastA({ type: 'state', players: aSnap(), leaderboard: lb, totalPlayers: aPlayers.size });
 }
 
-setInterval(agarTick, 100);
+setInterval(agarTick, 200);
 
 // ===== BOT SİSTEMİ =====
 const BOT_NAMES = ['BotAli','BlobKing','NomNom','xX_Pro','YemCani','GigaBlob','小小','FastEater','Reis','VirusLover','Shadow','Hunter','ProGamer','Noob','Master','Alpha','Omega','Phoenix','Dragon','Ninja','Samurai','Pirate','Knight','Wizard','Ghost'];
