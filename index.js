@@ -626,7 +626,7 @@ function handleMessage(ws, raw) {
 
 // ===== AGAR MODU (2D blob — agar.io grafik + mekanik: bölün, yem at, virüs) =====
 const A_W = 10000, A_H = 10000;
-const A_FOOD_TARGET = 4000;
+const A_FOOD_TARGET = 2000;
 const AGAR_COLORS = ['#ff5555', '#4ecdc4', '#ffe66d', '#6c5ce7', '#fd79a8', '#00b894', '#fdcb6e', '#e17055', '#0984e3', '#a29bfe', '#ff9ff3', '#feca57'];
 const aPlayers = new Map(); // id -> { id, name, ws, color, cells:[], tx, ty, remergeUntil }
 let aFood = [];    // küçük yem noktaları
@@ -835,11 +835,9 @@ function agarTick() {
     if (aFood.length < A_FOOD_TARGET - 100) ensureFood();
     const dt = 0.1;
 
-    // Hareket: her hücre hedefe gider, fırlatma impulsu söner
     for (const p of aPlayers.values()) {
         for (const c of p.cells) {
             c.vx *= 0.88; c.vy *= 0.88;
-            // aynı oyuncunun hücrelerini ayır (üst üste binmesin)
             for (const o of p.cells) {
                 if (o === c) continue;
                 const sx = c.x - o.x, sy = c.y - o.y;
@@ -868,65 +866,41 @@ function agarTick() {
         }
     }
 
-    // Fırlatılan kütle parçaları
     for (const f of aPellets) {
         f.x += f.vx * dt; f.y += f.vy * dt;
         f.vx *= 0.96; f.vy *= 0.96;
-        // Magnetic pellets: feast son 5sn'de en yakın oyuncuya çek
-        if (feastMode && Date.now() > feastEnd - 5000 && aPlayers.size > 0) {
-            let nearP = null, nearD = 99999;
-            for (const p of aPlayers.values()) {
-                for (const c of p.cells) {
-                    const dd = Math.hypot(c.x - f.x, c.y - f.y);
-                    if (dd < nearD) { nearD = dd; nearP = c; }
-                }
-            }
-            if (nearP && nearD > 1) {
-                const pull = 80 * dt;
-                f.vx += ((nearP.x - f.x) / nearD) * pull;
-                f.vy += ((nearP.y - f.y) / nearD) * pull;
-            }
-        }
         f.x = Math.max(f.r, Math.min(A_W - f.r, f.x));
         f.y = Math.max(f.r, Math.min(A_H - f.r, f.y));
     }
     aPellets = aPellets.filter(f => Date.now() - f.born < 45000);
 
-    // Yem + parça toplama + virüs
     const eatenFood = [];
     for (const p of aPlayers.values()) {
         for (let ci = 0; ci < p.cells.length; ci++) {
             const c = p.cells[ci];
             for (let i = aFood.length - 1; i >= 0; i--) {
                 const f = aFood[i];
-                if (Math.hypot(c.x - f.x, c.y - f.y) < c.r + f.r * 0.5) {
-                    const val = feastMode ? f.m * 2 : f.m;
-                    c.mass += val; c.r = aR(c.mass);
+                if ((c.x - f.x) * (c.x - f.x) + (c.y - f.y) * (c.y - f.y) < (c.r + f.r) * (c.r + f.r)) {
+                    c.mass += feastMode ? f.m * 2 : f.m; c.r = aR(c.mass);
                     aFood.splice(i, 1); eatenFood.push(f.id);
                     if (f.id === feastGoldenId) { feastGoldenId = null; broadcastA({ type: 'golden_eaten', eater: p.name }); }
                 }
             }
             for (let i = aPellets.length - 1; i >= 0; i--) {
                 const f = aPellets[i];
-                if (c.mass > f.mass && Math.hypot(c.x - f.x, c.y - f.y) < c.r + f.r * 0.4) {
-                    c.mass += f.mass; c.r = aR(c.mass);
-                    aPellets.splice(i, 1);
-                    broadcastA({ type: 'pellet_eaten', id: f.id });
+                if (c.mass > f.mass && (c.x - f.x) * (c.x - f.x) + (c.y - f.y) * (c.y - f.y) < (c.r + f.r) * (c.r + f.r)) {
+                    c.mass += f.mass; c.r = aR(c.mass); aPellets.splice(i, 1);
                 }
             }
-            // Virüs: büyük hücre patlar
             if (c.mass >= 100) {
                 for (let k = aViruses.length - 1; k >= 0; k--) {
                     const v = aViruses[k];
                     if (Math.hypot(c.x - v.x, c.y - v.y) < c.r * 0.7 + v.r * 0.5) {
                         aViruses.splice(k, 1);
                         broadcastA({ type: 'virus_eaten', vid: v.id, x: v.x, y: v.y });
-                        const nv = spawnVirusNearRandom();
-                        aViruses.push(nv);
+                        const nv = spawnVirusNearRandom(); aViruses.push(nv);
                         broadcastA({ type: 'virus_add', v: { id: nv.id, x: nv.x, y: nv.y, r: nv.r } });
-                        agarExplodeCell(p, c);
-                        ci--;
-                        break;
+                        agarExplodeCell(p, c); ci--; break;
                     }
                 }
             }
